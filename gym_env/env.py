@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from gym import Env
-from gym.spaces import Discrete
+from gym.spaces import Discrete, Box
 
 from gym_env.cycle import PlayerCycle
 from gym_env.enums import Action, Stage
@@ -128,7 +128,7 @@ class HoldemTable(Env):
 
         self.observation = None
         self.reward = None
-        self.info = None
+        self.info = {}
         self.done = False
         self.funds_history = None
         self.array_everything = None
@@ -139,18 +139,42 @@ class HoldemTable(Env):
 
         self.raise_illegal_moves = raise_illegal_moves
 
-    def reset(self):
+        # Define a default observation space - will be updated after players are added
+        # Using a large enough default size for up to 10 players
+        self._max_players = 10
+        self._default_obs_size = self._calculate_observation_size(self._max_players)
+        self.observation_space = Box(low=-np.inf, high=np.inf, 
+                                     shape=(self._default_obs_size,), dtype=np.float32)
+
+    def _calculate_observation_size(self, num_players):
+        """Calculate the size of the observation array based on number of players"""
+        # PlayerData: position (1) + equity values (3) + stack (num_players)
+        player_data_size = 4 + num_players
+        # CommunityData: current_player_position (num_players) + stage (4) + 
+        #                community_pot (1) + current_round_pot (1) + 
+        #                active_players (num_players) + big_blind (1) + small_blind (1) + 
+        #                legal_moves (len(Action))
+        community_data_size = 2 * num_players + 4 + 1 + 1 + 1 + 1 + len(Action)
+        # StageData (8 instances): 6 arrays of num_players each
+        stage_data_size = 8 * 6 * num_players
+        return player_data_size + community_data_size + stage_data_size
+
+    def reset(self, seed=None, options=None):
         """Reset after game over."""
+        # Handle seed for reproducibility (Gym API)
+        if seed is not None:
+            np.random.seed(seed)
+            
         self.observation = None
         self.reward = None
-        self.info = None
+        self.info = {}
         self.done = False
         self.funds_history = pd.DataFrame()
         self.first_action_for_hand = [True] * len(self.players)
 
         if not self.players:
             log.warning("No agents added. Add agents before resetting the environment.")
-            return
+            return np.array([]), {}
 
         for player in self.players:
             player.stack = self.initial_stacks
@@ -166,7 +190,7 @@ class HoldemTable(Env):
         if self._agent_is_autoplay() and not self.done:
             self.step('initial_player_autoplay')  # kick off the first action after bb by an autoplay agent
 
-        return self.array_everything
+        return self.array_everything, self.info
 
     def step(self, action):  # pylint: disable=arguments-differ
         """
@@ -207,7 +231,8 @@ class HoldemTable(Env):
                     self._calculate_reward(action)
 
             log.debug(f"Previous action reward for seat {self.acting_agent}: {self.reward}")
-        return self.array_everything, self.reward, self.done, self.info
+        # Return 5 values as per new Gym API: obs, reward, terminated, truncated, info
+        return self.array_everything, self.reward, self.done, False, self.info
 
     def _execute_step(self, action):
         self._process_decision(action)
@@ -238,7 +263,7 @@ class HoldemTable(Env):
 
         self.observation = None
         self.reward = 0
-        self.info = None
+        self.info = {}
 
         self.community_data = CommunityData(len(self.players))
         self.community_data.community_pot = self.community_pot / (self.big_blind * 100)
@@ -288,7 +313,7 @@ class HoldemTable(Env):
                      'stage_data': [stage.__dict__ for stage in self.stage_data],
                      'legal_moves': self.legal_moves}
 
-        self.observation_space = self.array_everything.shape
+        # Note: observation_space is set in __init__ and add_player, no need to update here
 
         if self.render_switch:
             self.render()
@@ -533,6 +558,11 @@ class HoldemTable(Env):
         self.players.append(player)
         self.player_status = [True] * len(self.players)
         self.player_pots = [0] * len(self.players)
+        
+        # Update observation space based on actual number of players
+        obs_size = self._calculate_observation_size(self.num_of_players)
+        self.observation_space = Box(low=-np.inf, high=np.inf, 
+                                     shape=(obs_size,), dtype=np.float32)
 
     def _end_round(self):
         """End of preflop, flop, turn or river"""
